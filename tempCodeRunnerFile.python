@@ -1,0 +1,467 @@
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ConvBnRelu3D(nn.Module):
+    """Conv3D → BatchNorm → ReLU block."""
+    def __init__(self, in_ch, out_ch, kernel=3, stride=1, padding=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv3d(in_ch, out_ch, kernel, stride=stride, padding=padding, bias=False),
+            nn.BatchNorm3d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x):
+        return self.block(x)
+
+
+class ResBlock3D(nn.Module):
+    """3D Residual block with skip connection."""
+    def __init__(self, channels, dropout=0.0):
+        super().__init__()
+        self.conv1 = ConvBnRelu3D(channels, channels)
+        self.conv2 = nn.Sequential(
+            nn.Conv3d(channels, channels, 3, padding=1, bias=False),
+            nn.BatchNorm3d(channels)
+        )
+        self.dropout = nn.Dropout3d(dropout)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.dropout(out)
+        out = self.conv2(out)
+        out = out + residual
+        return self.relu(out)
+
+
+class SEBlock3D(nn.Module):
+    """Squeeze-and-Excitation block — channel attention for 3D CNN."""
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Flatten(),
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        scale = self.se(x).view(x.shape[0], x.shape[1], 1, 1, 1)
+        return x * scale
+
+
+class SpatialAttention3D(nn.Module):
+    """Spatial attention gate — helps focus on substantia nigra / basal ganglia."""
+    def __init__(self, in_channels):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Conv3d(in_channels, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        attn = self.attention(x)
+        return x * attn, attn  # return map for visualization
+
+
+# ─────────────────────────────────────────────────────────────
+# Model 1: 3D ResNet18 for MRI classification
+# ─────────────────────────────────────────────────────────────
+
+class CNN3D_ResNet18(nn.Module):
+    """
+    3D ResNet-18 adapted for T1-weighted MRI.
+    Input: (B, 1, D, H, W) — single channel volumetric MRI
+    Output: (B, num_classes) logits
+    """
+
+    def __init__(self, in_channels=1, num_classes=2, dropout=0.4):
+        super().__init__()
+
+        # Stem: aggressive downsampling to reduce memory
+        self.stem = nn.Sequential(
+            nn.Conv3d(in_channels, 32, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm3d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(kernel_size=3, stride=2, padding=1)
+        )
+
+        # Residual stages
+        self.layer1 = self._make_layer(32,  64,  n_blocks=2, stride=2, dropout=dropout)
+        self.layer2 = self._make_layer(64,  128, n_blocks=2, stride=2, dropout=dropout)
+        self.layer3 = self._make_layer(128, 256, n_blocks=2, stride=2, dropout=dropout)
+
+        # SE channel attention after each stage
+        self.se1 = SEBlock3D(64)
+        self.se2 = SEBlock3D(128)
+        self.se3 = SEBlock3D(256)
+
+        # Global average pooling + classifier
+        self.gap = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+
+        self._initialize_weights()
+
+    def _make_layer(self, in_ch, out_ch, n_blocks, stride, dropout):
+        layers = [
+            # Downsampling block
+            nn.Sequential(
+                nn.Conv3d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False),
+                nn.BatchNorm3d(out_ch),
+                nn.ReLU(inplace=True)
+            )
+        ]
+        for _ in range(n_blocks - 1):
+            layers.append(ResBlock3D(out_ch, dropout=dropout))
+        return nn.Sequential(*layers)
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm3d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.se1(self.layer1(x))
+        x = self.se2(self.layer2(x))
+        x = self.se3(self.layer3(x))
+        x = self.gap(x)
+        return self.classifier(x)
+
+    def get_features(self, x):
+        """Extract CNN feature vector (for hybrid model)."""
+        x = self.stem(x)
+        x = self.se1(self.layer1(x))
+        x = self.se2(self.layer2(x))
+        x = self.se3(self.layer3(x))
+        x = self.gap(x)
+        return x.view(x.shape[0], -1)  # (B, 256)
+
+
+# ─────────────────────────────────────────────────────────────
+# Model 2: 3D DenseNet (better for small datasets)
+# ─────────────────────────────────────────────────────────────
+
+class DenseLayer3D(nn.Module):
+    def __init__(self, in_features, growth_rate, dropout=0.0):
+        super().__init__()
+        self.layer = nn.Sequential(
+            nn.BatchNorm3d(in_features),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(in_features, growth_rate * 4, 1, bias=False),  # bottleneck
+            nn.BatchNorm3d(growth_rate * 4),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(growth_rate * 4, growth_rate, 3, padding=1, bias=False),
+            nn.Dropout3d(dropout)
+        )
+
+    def forward(self, x):
+        return torch.cat([x, self.layer(x)], dim=1)
+
+
+class DenseBlock3D(nn.Module):
+    def __init__(self, in_features, growth_rate, n_layers, dropout=0.0):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        ch = in_features
+        for _ in range(n_layers):
+            self.layers.append(DenseLayer3D(ch, growth_rate, dropout))
+            ch += growth_rate
+        self.out_channels = ch
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class CNN3D_DenseNet(nn.Module):
+    """
+    3D DenseNet for MRI classification.
+    Dense connections encourage feature reuse — good for small neuroimaging datasets.
+    """
+
+    def __init__(self, in_channels=1, num_classes=2, growth_rate=16, dropout=0.4):
+        super().__init__()
+
+        self.stem = nn.Sequential(
+            nn.Conv3d(in_channels, 32, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm3d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool3d(3, stride=2, padding=1)
+        )
+
+        # Dense blocks
+        self.block1 = DenseBlock3D(32, growth_rate, n_layers=4, dropout=dropout)
+        ch1 = self.block1.out_channels
+        self.trans1 = self._transition(ch1, ch1 // 2)
+
+        self.block2 = DenseBlock3D(ch1 // 2, growth_rate, n_layers=4, dropout=dropout)
+        ch2 = self.block2.out_channels
+        self.trans2 = self._transition(ch2, ch2 // 2)
+
+        self.block3 = DenseBlock3D(ch2 // 2, growth_rate, n_layers=4, dropout=dropout)
+        ch3 = self.block3.out_channels
+
+        self.norm = nn.BatchNorm3d(ch3)
+        self.gap = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(ch3, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+
+    def _transition(self, in_ch, out_ch):
+        return nn.Sequential(
+            nn.BatchNorm3d(in_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(in_ch, out_ch, 1, bias=False),
+            nn.AvgPool3d(2, stride=2)
+        )
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.trans1(self.block1(x))
+        x = self.trans2(self.block2(x))
+        x = self.block3(x)
+        x = F.relu(self.norm(x))
+        x = self.gap(x)
+        return self.classifier(x)
+
+
+# ─────────────────────────────────────────────────────────────
+# Model 3: Attention CNN — focuses on PD-relevant brain regions
+# ─────────────────────────────────────────────────────────────
+
+class AttentionCNN3D(nn.Module):
+    """
+    3D CNN with spatial attention gates.
+    Learns to focus on substantia nigra and basal ganglia.
+    Attention maps are neurologically interpretable.
+    """
+
+    def __init__(self, in_channels=1, num_classes=2, dropout=0.4):
+        super().__init__()
+
+        self.enc1 = ConvBnRelu3D(in_channels, 32)
+        self.enc2 = ConvBnRelu3D(32, 64, stride=2)
+        self.enc3 = ConvBnRelu3D(64, 128, stride=2)
+        self.enc4 = ConvBnRelu3D(128, 256, stride=2)
+
+        self.attn1 = SpatialAttention3D(64)
+        self.attn2 = SpatialAttention3D(128)
+        self.attn3 = SpatialAttention3D(256)
+
+        self.gap = nn.AdaptiveAvgPool3d(1)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x, return_attention=False):
+        x = self.enc1(x)
+        x = self.enc2(x)
+        x, attn1 = self.attn1(x)
+        x = self.enc3(x)
+        x, attn2 = self.attn2(x)
+        x = self.enc4(x)
+        x, attn3 = self.attn3(x)
+
+        out = self.gap(x)
+        logits = self.classifier(out)
+
+        if return_attention:
+            return logits, {"attn1": attn1, "attn2": attn2, "attn3": attn3}
+        return logits
+
+
+# ─────────────────────────────────────────────────────────────
+# Model 4: Hybrid CNN — CNN features + morphometric features
+# ─────────────────────────────────────────────────────────────
+
+class HybridCNN(nn.Module):
+    """
+    Hybrid model combining:
+      - CNN visual features from 3D MRI
+      - Handcrafted morphometric biomarkers (GM volumes, asymmetry, etc.)
+    
+    This often outperforms CNN-only on small neuroimaging datasets.
+    """
+
+    def __init__(self, in_channels=1, num_classes=2, morphometric_dim=64, dropout=0.4):
+        super().__init__()
+
+        # CNN backbone (shared with ResNet)
+        self.cnn_backbone = CNN3D_ResNet18(in_channels, num_classes=2, dropout=dropout)
+        cnn_feature_dim = 256
+
+        # MLP for morphometric features
+        self.morph_mlp = nn.Sequential(
+            nn.Linear(morphometric_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU()
+        )
+
+        # Fusion layer
+        fusion_dim = cnn_feature_dim + 64
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, mri_volume, morph_features):
+        # Extract CNN visual features
+        cnn_feats = self.cnn_backbone.get_features(mri_volume)  # (B, 256)
+
+        # Process morphometric features
+        morph_feats = self.morph_mlp(morph_features)             # (B, 64)
+
+        # Fuse and classify
+        combined = torch.cat([cnn_feats, morph_feats], dim=1)    # (B, 320)
+        return self.fusion(combined)
+
+
+# ─────────────────────────────────────────────────────────────
+# Model 5: 2.5D CNN (Fast baseline using 3 orthogonal slices)
+# ─────────────────────────────────────────────────────────────
+
+class CNN25D(nn.Module):
+    """
+    2.5D CNN operating on 3 orthogonal center slices (sagittal, coronal, axial).
+    Much faster and lower memory than full 3D CNN.
+    Good as a baseline or for quick experiments.
+    Input: (B, 3, H, W) — 3-channel image
+    """
+
+    def __init__(self, num_classes=2, dropout=0.4):
+        super().__init__()
+
+        # Use a standard 2D ResNet-like backbone
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+
+            self._res2d(32, 64, stride=2),
+            self._res2d(64, 128, stride=2),
+            self._res2d(128, 256, stride=2),
+
+            nn.AdaptiveAvgPool2d(1)
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes)
+        )
+
+    def _res2d(self, in_ch, out_ch, stride):
+        return nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
+# ─────────────────────────────────────────────────────────────
+# Model factory
+# ─────────────────────────────────────────────────────────────
+
+def build_model(config: dict) -> nn.Module:
+    """Build model from config dict."""
+    cfg = config["model"]
+    arch = cfg["architecture"]
+
+    print(f"\n  Building model: {arch}")
+
+    if arch == "3d_resnet18":
+        model = CNN3D_ResNet18(
+            in_channels=cfg["in_channels"],
+            num_classes=cfg["num_classes"],
+            dropout=cfg["dropout"]
+        )
+    elif arch == "3d_densenet":
+        model = CNN3D_DenseNet(
+            in_channels=cfg["in_channels"],
+            num_classes=cfg["num_classes"],
+            dropout=cfg["dropout"]
+        )
+    elif arch == "attention_cnn":
+        model = AttentionCNN3D(
+            in_channels=cfg["in_channels"],
+            num_classes=cfg["num_classes"],
+            dropout=cfg["dropout"]
+        )
+    elif arch == "hybrid_cnn":
+        model = HybridCNN(
+            in_channels=cfg["in_channels"],
+            num_classes=cfg["num_classes"],
+            morphometric_dim=cfg["morphometric_dim"],
+            dropout=cfg["dropout"]
+        )
+    elif arch == "2.5d_cnn":
+        model = CNN25D(num_classes=cfg["num_classes"], dropout=cfg["dropout"])
+    else:
+        raise ValueError(f"Unknown architecture: {arch}")
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Trainable parameters: {n_params:,}")
+    return model
+
+
+if __name__ == "__main__":
+    # Quick smoke test all models
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    dummy_3d = torch.randn(2, 1, 96, 114, 96).to(device)
+    dummy_2d = torch.randn(2, 3, 96, 96).to(device)
+    dummy_morph = torch.randn(2, 64).to(device)
+
+    for name, model in [
+        ("ResNet18",   CNN3D_ResNet18()),
+        ("DenseNet",   CNN3D_DenseNet()),
+        ("Attention",  AttentionCNN3D()),
+        ("2.5D CNN",   CNN25D()),
+    ]:
+        model = model.to(device)
+        inp = dummy_2d if "2.5D" in name else dummy_3d
+        out = model(inp)
+        print(f"  {name}: input={inp.shape} → output={out.shape}")
+
+    hybrid = HybridCNN(morphometric_dim=64).to(device)
+    out = hybrid(dummy_3d, dummy_morph)
+    print(f"  Hybrid: input={dummy_3d.shape}+{dummy_morph.shape} → output={out.shape}")
