@@ -165,7 +165,7 @@ with st.sidebar:
 
     nav = st.radio(
         "Navigation",
-        ["🏠  Dashboard", "🧲  MRI Analysis", "✍️  Scribble Test", "📡  Hand Tremor"],
+        ["🏠  Dashboard", "🧲  MRI Analysis", "✍️  Scribble Test"],
         label_visibility="collapsed"
     )
     st.markdown("---")
@@ -181,51 +181,53 @@ with st.sidebar:
         <div style="width:8px;height:8px;border-radius:50%;background:#d29922;"></div>
         <span style="font-size:0.8rem;color:#8b949e;">Scribble Test — Coming Soon</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <div style="width:8px;height:8px;border-radius:50%;background:#d29922;"></div>
-        <span style="font-size:0.8rem;color:#8b949e;">Hand Tremor — Coming Soon</span>
-      </div>
+
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown('<p class="label-text">Model Info</p>', unsafe_allow_html=True)
-    st.markdown("""
-    <div style="font-size:0.8rem;color:#8b949e;line-height:1.8;">
-      Architecture: <span style="color:#e6edf3;">ResNet-50</span><br>
-      Input: <span style="color:#e6edf3;">224 × 224 px</span><br>
-      Classes: <span style="color:#e6edf3;">Parkinson / Normal</span><br>
-      Dataset: <span style="color:#e6edf3;">831 MRI scans</span>
-    </div>
-    """, unsafe_allow_html=True)
+
 
 # ─── Model loader (cached) ───────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_model():
-    """Load or build the ResNet-50 model."""
+    """Load saved .h5 if available, otherwise return untrained base."""
     try:
         import tensorflow as tf
         from tensorflow.keras.applications import ResNet50
-        from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
+        from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense, BatchNormalization
         from tensorflow.keras.models import Model
+        from tensorflow.keras.optimizers import Adam
 
-        base_model = ResNet50(
-            weights="imagenet",
-            include_top=False,
-            input_shape=(224, 224, 3),
-        )
-        for layer in base_model.layers[:-5]:
+        # Try to load previously trained model first
+        search_paths = [
+            Path("parkinsons_resnet50.h5"),
+            Path(r"C:\Users\LENOVO\Downloads\archive (5)\parkinsons_resnet50.h5"),
+            Path(r"C:\Users\LENOVO\Downloads\parkinsons_resnet50.h5"),
+        ]
+        for p in search_paths:
+            if p.exists():
+                model = tf.keras.models.load_model(str(p))
+                return model, None, f"trained:{p}"
+
+        # No saved model — build base (needs training before inference)
+        base_model = ResNet50(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
+        for layer in base_model.layers[:140]:
             layer.trainable = False
-
+        for layer in base_model.layers[140:]:
+            layer.trainable = True
         x = base_model.output
         x = GlobalAveragePooling2D()(x)
-        x = Dropout(0.5)(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.4)(x)
+        x = Dense(256, activation="relu")(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.3)(x)
         output = Dense(1, activation="sigmoid")(x)
         model = Model(inputs=base_model.input, outputs=output)
-        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-        return model, None
+        model.compile(optimizer=Adam(1e-4), loss="binary_crossentropy", metrics=["accuracy"])
+        return model, None, "untrained"
     except Exception as e:
-        return None, str(e)
+        return None, str(e), "error"
 
 
 def preprocess_image(uploaded_file):
@@ -293,31 +295,14 @@ def page_dashboard():
     st.markdown('<div class="page-title">Clinical Decision Support</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-subtitle">Parkinson\'s Disease Diagnostic Assistant — Neuroimaging & Motor Assessment</div>', unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    for col, val, lbl in zip(
-        [c1, c2, c3, c4],
-        ["ResNet-50", "224×224", "2-Class", "~85%"],
-        ["Architecture", "Input Resolution", "Task Type", "Val. Accuracy"],
-    ):
-        with col:
-            st.markdown(f"""
-            <div class="metric-tile">
-              <div class="metric-value">{val}</div>
-              <div class="metric-label">{lbl}</div>
-            </div>""", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    col_l, col_r = st.columns([2, 1])
-
-    with col_l:
+    if True:
         st.markdown('<div class="section-header">Diagnostic Modules</div>', unsafe_allow_html=True)
         modules = [
             ("🧲", "MRI Neuroimaging Analysis", "active",
              "Deep learning classification of T1/T2-weighted and diffusion MRI scans using ResNet-50 transfer learning. Supports Grad-CAM saliency visualisation."),
             ("✍️", "Handwriting / Scribble Test", "pending",
              "Automated analysis of micrographia and spiral-drawing irregularities — established early biomarkers for dopaminergic pathway degeneration."),
-            ("📡", "Resting Hand Tremor Analysis", "pending",
-             "Accelerometer or video-based frequency decomposition (3–6 Hz resting tremor characterisation) correlated with UPDRS motor subscales."),
         ]
         for icon, title, status, desc in modules:
             badge = '<span class="badge-active">ACTIVE</span>' if status == "active" else '<span class="badge-pending">COMING SOON</span>'
@@ -330,22 +315,7 @@ def page_dashboard():
               <div style="font-size:0.82rem;color:#8b949e;margin-top:0.5rem;line-height:1.6;">{desc}</div>
             </div>""", unsafe_allow_html=True)
 
-    with col_r:
-        st.markdown('<div class="section-header">Dataset Overview</div>', unsafe_allow_html=True)
-        data = {"Category": ["Total Scans", "Parkinson", "Normal", "MRI Types", "Train Split", "Test Split"],
-                "Value":    ["831",          "~415",       "~416",   "18",         "80%",         "20%"]}
-        for cat, val in zip(data["Category"], data["Value"]):
-            st.markdown(f"""
-            <div style="display:flex;justify-content:space-between;padding:0.5rem 0;border-bottom:1px solid #21262d;">
-              <span class="label-text">{cat}</span>
-              <span class="value-text">{val}</span>
-            </div>""", unsafe_allow_html=True)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">MRI Sequence Types</div>', unsafe_allow_html=True)
-        seqs = ["T1W (3D FLASH)", "T2W TSE", "DWI/ADC", "SWI/mIP", "T2-FLAIR", "+ 13 more"]
-        for s in seqs:
-            st.markdown(f'<div style="font-size:0.82rem;color:#8b949e;padding:3px 0;">• {s}</div>', unsafe_allow_html=True)
 
     st.markdown("""
     <div class="disclaimer">
@@ -378,19 +348,24 @@ def page_mri():
         show_gradcam = st.checkbox("Generate Grad-CAM Overlay", value=True,
                                    help="Visualises which regions influenced the model's decision.")
         show_confidence = st.checkbox("Show Confidence Breakdown", value=True)
-        threshold = st.slider("Classification Threshold", 0.0, 1.0, 0.5, 0.05,
+        threshold = st.slider("Classification Threshold", 0.0, 1.0, 0.35, 0.05,
                               help="Probability above this value = Parkinson's positive.")
 
     if uploaded is not None:
         st.markdown("---")
         with st.spinner("🔬 Preprocessing image and loading model…"):
-            model, err = load_model()
+            model, err, model_status = load_model()
             img_array, pil_img = preprocess_image(uploaded)
 
         if err:
             st.error(f"⚠️ Model load failed: {err}")
-            st.info("Running in demo mode with simulated output.")
             model = None
+
+        # Show model status banner
+        if model_status == "untrained":
+            st.warning("⚠️ **No trained model found.** Predictions will be unreliable. Please train the model first using the panel below, then restart the app.")
+        elif model_status.startswith("trained:"):
+            st.success(f"✅ Loaded trained model: `{model_status.replace('trained:','')}`")
 
         if img_array is None:
             st.error(f"⚠️ Image preprocessing failed: {pil_img}")
@@ -401,9 +376,8 @@ def page_mri():
             with st.spinner("🧠 Running inference…"):
                 raw_prob = float(model.predict(img_array, verbose=0)[0][0])
         else:
-            # Demo: simulate a result
-            np.random.seed(42)
-            raw_prob = float(np.random.uniform(0.1, 0.9))
+            st.error("Cannot run inference — model failed to load.")
+            return
 
         parkinson_prob = raw_prob
         normal_prob    = 1.0 - raw_prob
@@ -512,78 +486,73 @@ def page_mri():
           </div>
         </div>""", unsafe_allow_html=True)
 
-    # Training section
-    with st.expander("🏋️ Model Training (Advanced)", expanded=False):
-        st.markdown('<div class="section-header">Training Pipeline</div>', unsafe_allow_html=True)
-        st.markdown("""
-        <div style="font-size:0.85rem;color:#8b949e;line-height:1.8;">
-          To train the model on your own dataset, ensure the following folder structure:<br><br>
-          <code style="color:#79c0ff;background:#0d1117;padding:2px 6px;border-radius:4px;">
-          parkinsons_dataset/<br>
-          &nbsp;&nbsp;parkinson/<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;*.png<br>
-          &nbsp;&nbsp;normal/<br>
-          &nbsp;&nbsp;&nbsp;&nbsp;*.png
-          </code>
-        </div>
-        """, unsafe_allow_html=True)
 
-        data_path = st.text_input("Dataset Directory", placeholder="/path/to/parkinsons_dataset")
-        epochs    = st.slider("Training Epochs", 5, 50, 25, 5)
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            batch_size = st.selectbox("Batch Size", [16, 32, 64], index=1)
-        with col_t2:
-            test_split = st.slider("Test Split", 0.1, 0.4, 0.2, 0.05)
-
-        if st.button("🚀 Start Training"):
-            if not data_path:
-                st.warning("⚠️ Please enter a valid dataset directory path.")
-            else:
-                run_training(data_path, epochs, batch_size, test_split)
 
 
 def run_training(data_path, epochs, batch_size, test_split):
-    """Run the full training pipeline with live progress."""
+    """Run the full fixed training pipeline with class weights and proper MRI augmentation."""
     try:
         import tensorflow as tf
         from tensorflow.keras.applications import ResNet50
-        from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
+        from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense, BatchNormalization
         from tensorflow.keras.models import Model
+        from tensorflow.keras.optimizers import Adam
+        from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
         from tensorflow.keras.preprocessing.image import ImageDataGenerator
         from sklearn.model_selection import train_test_split
         from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+        from sklearn.utils.class_weight import compute_class_weight
+        import seaborn as sns
 
         path = Path(data_path)
         if not path.exists():
             st.error(f"❌ Directory not found: {data_path}")
+            st.info("Make sure the path is exactly: C:\\Users\\LENOVO\\Downloads\\archive (5)\\parkinsons_dataset")
             return
 
         # ── Load file paths ──
-        df = pd.DataFrame({"path": list(path.glob("*/*.png"))})
-        if df.empty:
-            df = pd.DataFrame({"path": list(path.glob("*/*.jpg")) + list(path.glob("*/*.jpeg"))})
-        if df.empty:
-            st.error("❌ No images found. Expected PNG/JPG inside class subfolders.")
+        imgs = list(path.glob("*/*.png")) + list(path.glob("*/*.jpg")) + list(path.glob("*/*.jpeg"))
+        if not imgs:
+            st.error("❌ No images found. Make sure subfolders are named 'parkinson' and 'normal'.")
             return
 
-        df["disease"] = df["path"].map(lambda x: x.parent.stem)
+        df = pd.DataFrame({"path": imgs})
+        df["disease"] = df["path"].map(lambda x: x.parent.stem.lower().strip())
         df["path_str"] = df["path"].astype(str)
 
-        st.success(f"✅ Found {len(df)} images — Classes: {df['disease'].unique().tolist()}")
+        class_counts = df["disease"].value_counts()
+        st.markdown(f"""
+        <div class="med-card-accent">
+          <div style="font-size:0.85rem;color:#3fb950;font-weight:600;">✅ Dataset Loaded</div>
+          <div style="font-size:0.82rem;color:#8b949e;margin-top:6px;">
+            Total: <b style="color:#e6edf3;">{len(df)}</b> images &nbsp;|&nbsp;
+            Classes: <b style="color:#e6edf3;">{df['disease'].unique().tolist()}</b><br>
+            {' &nbsp;|&nbsp; '.join([f"<b style='color:#e6edf3;'>{k}</b>: {v}" for k,v in class_counts.items()])}
+          </div>
+        </div>""", unsafe_allow_html=True)
 
-        X = df["path_str"]
-        y = df["disease"]
+        # ── Stratified split ──
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_split, random_state=42, stratify=y
+            df["path_str"], df["disease"],
+            test_size=test_split, random_state=42, stratify=df["disease"]
         )
 
-        # ── Generators ──
+        # ── Class weights to fix imbalance bias ──
+        classes = np.array(sorted(df["disease"].unique()))
+        weights = compute_class_weight("balanced", classes=classes, y=df["disease"])
+        class_weight_dict = dict(enumerate(weights))
+        st.markdown(f'<div style="font-size:0.8rem;color:#8b949e;">⚖️ Class weights applied: {dict(zip(classes, weights.round(3)))}</div>', unsafe_allow_html=True)
+
+        # ── MRI-specific augmentation (NO horizontal flip — brain asymmetry matters) ──
         train_datagen = ImageDataGenerator(
-            rescale=1.0 / 255, rotation_range=20,
-            width_shift_range=0.2, height_shift_range=0.2,
-            shear_range=0.2, zoom_range=0.2,
-            horizontal_flip=True, fill_mode="nearest",
+            rescale=1.0 / 255,
+            rotation_range=10,          # subtle rotation only
+            width_shift_range=0.05,     # minimal shift
+            height_shift_range=0.05,
+            zoom_range=0.1,             # slight zoom
+            brightness_range=[0.9, 1.1],
+            fill_mode="nearest",
+            # horizontal_flip=False  ← intentionally omitted for MRI
         )
         test_datagen = ImageDataGenerator(rescale=1.0 / 255)
 
@@ -592,42 +561,79 @@ def run_training(data_path, epochs, batch_size, test_split):
 
         train_gen = train_datagen.flow_from_dataframe(
             train_df, x_col="path", y_col="disease",
-            target_size=(224, 224), batch_size=batch_size, class_mode="binary"
+            target_size=(224, 224), batch_size=batch_size,
+            class_mode="binary", shuffle=True
         )
         test_gen = test_datagen.flow_from_dataframe(
             test_df, x_col="path", y_col="disease",
             target_size=(224, 224), batch_size=batch_size,
-            class_mode="binary", shuffle=False
+            class_mode="binary", shuffle=False   # must be False for confusion matrix
         )
 
-        # ── Build model ──
+        # Show which label maps to 0/1 so user knows orientation
+        st.markdown(f'<div style="font-size:0.8rem;color:#8b949e;margin-bottom:8px;">🗂️ Class index mapping: {train_gen.class_indices}</div>', unsafe_allow_html=True)
+
+        # ── Build model — unfreeze more layers for MRI fine-tuning ──
         base = ResNet50(weights="imagenet", include_top=False, input_shape=(224, 224, 3))
-        for layer in base.layers[:-5]:
+
+        # Freeze first 140 layers, unfreeze last ~10 ResNet blocks
+        for layer in base.layers[:140]:
             layer.trainable = False
+        for layer in base.layers[140:]:
+            layer.trainable = True
+
         x = base.output
         x = GlobalAveragePooling2D()(x)
-        x = Dropout(0.5)(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.4)(x)
+        x = Dense(256, activation="relu")(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.3)(x)
         out = Dense(1, activation="sigmoid")(x)
+
         model = Model(inputs=base.input, outputs=out)
-        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+        model.compile(
+            optimizer=Adam(learning_rate=1e-4),  # lower LR for fine-tuning
+            loss="binary_crossentropy",
+            metrics=["accuracy"]
+        )
 
-        # ── Train ──
-        progress_bar = st.progress(0)
-        status_text  = st.empty()
+        # ── Callbacks ──
+        reduce_lr = ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=3,
+            min_lr=1e-7, verbose=0
+        )
+        early_stop = EarlyStopping(
+            monitor="val_loss", patience=7,
+            restore_best_weights=True, verbose=0
+        )
+
+        # ── Train with live charts ──
+        progress_bar     = st.progress(0)
+        status_text      = st.empty()
         chart_placeholder = st.empty()
-
         acc_hist, val_acc_hist, loss_hist, val_loss_hist = [], [], [], []
 
         for epoch in range(1, epochs + 1):
-            status_text.markdown(f'<span style="color:#58a6ff;font-size:0.85rem;">Epoch {epoch}/{epochs}</span>', unsafe_allow_html=True)
-            h = model.fit(train_gen, validation_data=test_gen, epochs=1, verbose=0)
+            status_text.markdown(
+                f'<span style="color:#58a6ff;font-size:0.85rem;">🔄 Epoch {epoch}/{epochs} — training…</span>',
+                unsafe_allow_html=True
+            )
+            h = model.fit(
+                train_gen,
+                validation_data=test_gen,
+                epochs=1,
+                class_weight=class_weight_dict,   # ← KEY FIX
+                callbacks=[reduce_lr],
+                verbose=0
+            )
             acc_hist.append(h.history["accuracy"][0])
             val_acc_hist.append(h.history["val_accuracy"][0])
             loss_hist.append(h.history["loss"][0])
             val_loss_hist.append(h.history["val_loss"][0])
             progress_bar.progress(epoch / epochs)
 
-            if epoch % 3 == 0 or epoch == epochs:
+            if epoch % 2 == 0 or epoch == epochs:
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3))
                 fig.patch.set_facecolor("#161b22")
                 for ax in [ax1, ax2]:
@@ -638,66 +644,86 @@ def run_training(data_path, epochs, batch_size, test_split):
                     ax.title.set_color("#e6edf3")
                     for spine in ax.spines.values():
                         spine.set_edgecolor("#30363d")
-
-                ax1.plot(acc_hist, color="#58a6ff", label="Train Acc", linewidth=2)
-                ax1.plot(val_acc_hist, color="#3fb950", label="Val Acc", linewidth=2, linestyle="--")
-                ax1.set_title("Accuracy"); ax1.legend(facecolor="#161b22", labelcolor="#8b949e")
-
-                ax2.plot(loss_hist, color="#f85149", label="Train Loss", linewidth=2)
-                ax2.plot(val_loss_hist, color="#d29922", label="Val Loss", linewidth=2, linestyle="--")
-                ax2.set_title("Loss"); ax2.legend(facecolor="#161b22", labelcolor="#8b949e")
-
+                ax1.plot(acc_hist,     color="#58a6ff", label="Train",      linewidth=2)
+                ax1.plot(val_acc_hist, color="#3fb950", label="Validation", linewidth=2, linestyle="--")
+                ax1.set_title("Accuracy"); ax1.set_ylim(0, 1)
+                ax1.legend(facecolor="#161b22", labelcolor="#8b949e")
+                ax2.plot(loss_hist,     color="#f85149", label="Train",      linewidth=2)
+                ax2.plot(val_loss_hist, color="#d29922", label="Validation", linewidth=2, linestyle="--")
+                ax2.set_title("Loss")
+                ax2.legend(facecolor="#161b22", labelcolor="#8b949e")
                 plt.tight_layout()
                 chart_placeholder.pyplot(fig)
                 plt.close(fig)
 
-        status_text.markdown('<span style="color:#3fb950;font-size:0.85rem;">✅ Training complete!</span>', unsafe_allow_html=True)
+        status_text.markdown('<span style="color:#3fb950;font-size:0.9rem;font-weight:600;">✅ Training complete!</span>', unsafe_allow_html=True)
 
         # ── Evaluation ──
-        preds_raw  = model.predict(test_gen, verbose=0)
-        preds      = (preds_raw > 0.5).astype(int).flatten()
+        preds_raw   = model.predict(test_gen, verbose=0).flatten()
+        # Use 0.5 threshold (class weights already balanced bias during training)
+        preds       = (preds_raw >= 0.5).astype(int)
         true_labels = test_gen.classes
         acc = accuracy_score(true_labels, preds)
 
-        st.markdown(f"""
-        <div class="result-negative" style="margin-top:1rem;">
-          <div style="font-size:0.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:1px;">Final Validation Accuracy</div>
-          <div style="font-size:2rem;font-weight:700;color:#3fb950;">{acc*100:.2f}%</div>
-        </div>""", unsafe_allow_html=True)
+        # Per-class accuracy
+        class_idx   = train_gen.class_indices          # e.g. {'normal':0, 'parkinson':1}
+        idx_to_class = {v: k for k, v in class_idx.items()}
 
-        cm = confusion_matrix(true_labels, preds)
-        st.markdown('<div class="label-text" style="margin-top:1rem;">Confusion Matrix</div>', unsafe_allow_html=True)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"""
+            <div class="result-negative" style="margin-top:1rem;text-align:center;">
+              <div class="label-text">Overall Validation Accuracy</div>
+              <div style="font-size:2.2rem;font-weight:700;color:#3fb950;">{acc*100:.1f}%</div>
+            </div>""", unsafe_allow_html=True)
 
-        fig_cm, ax = plt.subplots(figsize=(4, 3))
+        with col_b:
+            # Show how many of each class were correctly predicted
+            for cls_name, cls_idx in class_idx.items():
+                mask     = true_labels == cls_idx
+                cls_acc  = accuracy_score(true_labels[mask], preds[mask]) * 100
+                color    = "#f85149" if "park" in cls_name else "#3fb950"
+                st.markdown(f"""
+                <div style="padding:0.5rem 0;border-bottom:1px solid #21262d;">
+                  <span class="label-text">{cls_name.capitalize()} accuracy</span>
+                  <span style="float:right;color:{color};font-weight:700;">{cls_acc:.1f}%</span>
+                </div>""", unsafe_allow_html=True)
+
+        # ── Confusion matrix ──
+        st.markdown('<div class="section-header" style="margin-top:1.5rem;">Confusion Matrix</div>', unsafe_allow_html=True)
+        labels_sorted = [idx_to_class[i] for i in sorted(idx_to_class)]
+        fig_cm, ax = plt.subplots(figsize=(5, 4))
         fig_cm.patch.set_facecolor("#161b22")
         ax.set_facecolor("#0d1117")
-        import seaborn as sns
         sns.heatmap(
-            cm, annot=True, fmt="d", cmap="Blues",
-            xticklabels=["Normal", "Parkinson"],
-            yticklabels=["Normal", "Parkinson"],
+            confusion_matrix(true_labels, preds),
+            annot=True, fmt="d", cmap="Blues",
+            xticklabels=labels_sorted, yticklabels=labels_sorted,
             ax=ax, linewidths=1, linecolor="#30363d"
         )
         ax.set_xlabel("Predicted", color="#8b949e")
-        ax.set_ylabel("Actual", color="#8b949e")
+        ax.set_ylabel("Actual",    color="#8b949e")
         ax.tick_params(colors="#8b949e")
-        ax.title.set_color("#e6edf3")
         plt.tight_layout()
         st.pyplot(fig_cm)
         plt.close(fig_cm)
 
-        report = classification_report(true_labels, preds, target_names=["Normal", "Parkinson"])
+        report = classification_report(true_labels, preds, target_names=labels_sorted)
         st.code(report, language="text")
 
-        # Save model
-        save_path = "parkinsons_resnet50.h5"
+        # ── Save model ──
+        save_path = str(Path(data_path).parent / "parkinsons_resnet50.h5")
         model.save(save_path)
-        st.success(f"💾 Model saved to: {save_path}")
+        st.success(f"💾 Model saved → {save_path}")
+        st.info("Next time you open the app, place this .h5 file in the same folder as parkinsons_app.py and it will load automatically.")
 
     except ImportError as e:
-        st.error(f"Missing dependency: {e}\nInstall with: pip install tensorflow scikit-learn seaborn")
+        st.error(f"Missing dependency: {e}")
+        st.code("pip install tensorflow scikit-learn seaborn opencv-python", language="bash")
     except Exception as e:
+        import traceback
         st.error(f"Training error: {e}")
+        st.code(traceback.format_exc(), language="text")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -757,82 +783,6 @@ def page_scribble():
         </div>""", unsafe_allow_html=True)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# PAGE — HAND TREMOR
-# ════════════════════════════════════════════════════════════════════════════
-def page_tremor():
-    st.markdown('<div class="page-title">📡 Hand Tremor Analysis</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-subtitle">Resting tremor frequency analysis — 3–6 Hz characterisation correlated with UPDRS motor score</div>', unsafe_allow_html=True)
-
-    st.markdown("""
-    <div style="background:#161b22;border:1px solid #d2992244;border-left:4px solid #d29922;border-radius:10px;padding:1.25rem 1.5rem;margin-bottom:1.5rem;">
-      <div style="font-size:0.85rem;font-weight:600;color:#d29922;margin-bottom:0.4rem;">🚧 Module Under Development</div>
-      <div style="font-size:0.82rem;color:#8b949e;line-height:1.7;">
-        The Hand Tremor module pipeline is designed. Accelerometer CSV ingestion and FFT-based
-        frequency analysis are ready for backend connection.
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-    col1, col2 = st.columns([3, 2])
-    with col1:
-        st.markdown('<div class="section-header">Signal Analysis Preview</div>', unsafe_allow_html=True)
-
-        # Simulated tremor waveform (demo only)
-        t = np.linspace(0, 4, 1000)
-        parkinson_signal = (
-            0.8 * np.sin(2 * np.pi * 4.5 * t) +        # 4.5 Hz resting tremor
-            0.2 * np.sin(2 * np.pi * 9.0 * t) +         # harmonic
-            0.15 * np.random.randn(len(t))
-        )
-        normal_signal = 0.15 * np.random.randn(len(t))
-
-        fig, axes = plt.subplots(2, 1, figsize=(10, 5))
-        fig.patch.set_facecolor("#161b22")
-        for ax, sig, label, col in zip(
-            axes,
-            [parkinson_signal, normal_signal],
-            ["Simulated Parkinson's Tremor (4.5 Hz)", "Simulated Normal (Control)"],
-            ["#f85149", "#3fb950"]
-        ):
-            ax.set_facecolor("#0d1117")
-            ax.plot(t, sig, color=col, linewidth=0.8, alpha=0.85)
-            ax.set_title(label, color="#e6edf3", fontsize=9, pad=6)
-            ax.set_xlabel("Time (s)", color="#8b949e", fontsize=8)
-            ax.set_ylabel("Amplitude", color="#8b949e", fontsize=8)
-            ax.tick_params(colors="#8b949e", labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_edgecolor("#30363d")
-        plt.tight_layout()
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
-        st.markdown('<div style="font-size:0.75rem;color:#8b949e;margin-top:4px;">⚠️ Waveforms are simulated for demonstration purposes only.</div>', unsafe_allow_html=True)
-
-    with col2:
-        st.markdown('<div class="section-header">Upload Sensor Data (Preview)</div>', unsafe_allow_html=True)
-        st.file_uploader("Upload accelerometer CSV", type=["csv"], disabled=True,
-                         help="Module not yet active.", label_visibility="collapsed")
-
-        st.markdown("""
-        <div class="result-pending">
-          <div style="font-size:0.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:1px;">Module Status</div>
-          <div style="font-size:1.1rem;font-weight:600;color:#8b949e;margin-top:0.4rem;">⏳ Integration Pending</div>
-        </div>""", unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">Planned Analysis</div>', unsafe_allow_html=True)
-        items = [
-            ("📈", "FFT Power Spectrum",      "Peak frequency and power in 3–6 Hz band"),
-            ("🎯", "Tremor Score",            "UPDRS-correlated composite score"),
-            ("📉", "Action vs Rest",          "Differential tremor type classification"),
-            ("🗂️", "Longitudinal Tracking",   "Session-over-session progression charting"),
-        ]
-        for icon, title, desc in items:
-            st.markdown(f"""
-            <div class="med-card" style="padding:0.85rem;margin-bottom:0.5rem;">
-              <div style="font-size:0.85rem;color:#e6edf3;font-weight:600;">{icon} {title}</div>
-              <div style="font-size:0.76rem;color:#8b949e;margin-top:3px;">{desc}</div>
-            </div>""", unsafe_allow_html=True)
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # ROUTER
@@ -840,4 +790,4 @@ def page_tremor():
 if "Dashboard"  in nav: page_dashboard()
 elif "MRI"      in nav: page_mri()
 elif "Scribble" in nav: page_scribble()
-elif "Tremor"   in nav: page_tremor()
+
