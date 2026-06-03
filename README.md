@@ -1,4 +1,5 @@
-<img width="1693" height="929" alt="ChatGPT Image Jun 3, 2026, 07_57_26 PM" src="https://github.com/user-attachments/assets/40c37979-03c8-4adf-be99-61828b0e84ce" /><img width="1693" height="929" alt="image" src="https://github.com/user-attachments/assets/ef9682d8-910b-4aee-8d61-a4df18c7b01c" /># 🧬 NeuroScan AI
+<img width="1693" height="929" alt="ChatGPT Image Jun 3, 2026, 07_57_26 PM" src="https://github.com/user-attachments/assets/40c37979-03c8-4adf-be99-61828b0e84ce" /
+# 🧬 NeuroScan AI
 
 ### AI-powered Parkinson’s Disease Diagnostic System using MRI Analysis, Tremor Detection & Deep Learning
 
