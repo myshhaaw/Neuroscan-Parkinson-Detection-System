@@ -7,7 +7,6 @@
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge\&logo=python\&logoColor=white)
 ![TensorFlow](https://img.shields.io/badge/TensorFlow-FF6F00?style=for-the-badge\&logo=tensorflow\&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge\&logo=fastapi\&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge\&logo=streamlit\&logoColor=white)
 
 </p>
@@ -46,20 +45,12 @@ The project aims to improve accessibility and support early neurological assessm
 * Confusion matrix analysis
 * Accuracy and loss visualization
 
-## 🚀 Deployment
-
-* FastAPI backend integration
-* Real-time inference pipeline
-* Streamlit-based interactive interface
-
 ---
 
 # 📂 Project Structure
 
 ```bash
 NeuroScan/
-│
-├── api_server.py              # FastAPI backend
 ├── app.py                     # Main application
 ├── preprocessing.py           # Data preprocessing pipeline
 ├── segmentation.py            # MRI segmentation logic
@@ -94,9 +85,8 @@ NeuroScan/
 * GradCAM
 * Computer Vision
 
-## Backend & Deployment
+## Backend
 
-* FastAPI
 * Streamlit
 
 ## Data Processing
@@ -155,20 +145,10 @@ cd Neuroscan-Parkinson-Detection-System
 ```bash
 pip install -r requirements.txt
 ```
-
----
-
-## Run the Application
-
-```bash
-python app.py
-```
-
 ---
 
 # 🔮 Future Improvements
 
-* Advanced multimodal diagnostic analysis
 * Larger MRI dataset integration
 * Improved explainability pipelines
 * Cloud deployment support
